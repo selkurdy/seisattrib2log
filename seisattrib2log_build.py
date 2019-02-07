@@ -6,7 +6,7 @@ Designed to:
 
 python seisattrib2log_build.py -h
 python seisattrib2log_build.py allsgy.txt allgr.csv --startendslice 500 1000
-
+python seisattrib2log_build.py limbayongattrib.txt allgr.csv --startendslice 1400 2900 --intime
 """
 
 import os.path
@@ -303,7 +303,11 @@ def get_xy(fname,xhdr,yhdr,xyscalerhdr):
     yclst = list()
     with sg.open(fname,'r',ignore_geometry=True) as srcp:
         for trnum,tr in enumerate(srcp.trace):
-            xysc = np.fabs(srcp.header[trnum][xyscalerhdr])
+            xysch = np.fabs(srcp.header[trnum][xyscalerhdr])
+            if xysch == 0:
+                xysc = 1.0
+            else:
+                xysc = xysch
             xclst.append(srcp.header[trnum][xhdr] / xysc)
             yclst.append(srcp.header[trnum][yhdr] / xysc)
     return xclst,yclst
