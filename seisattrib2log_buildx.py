@@ -74,6 +74,56 @@ def pip(x, y, poly):
 
 #...............................................................................
 class Invdisttree:
+    """ inverse-distance-weighted interpolation using KDTree:
+    invdisttree = Invdisttree( X, z )  -- data points, values
+    interpol = invdisttree( q, nnear=3, eps=0, p=1, weights=None, stat=0 )
+    interpolates z from the 3 points nearest each query point q;
+    For example, interpol[ a query point q ]
+    finds the 3 data points nearest q, at distances d1 d2 d3
+    and returns the IDW average of the values z1 z2 z3
+        (z1/d1 + z2/d2 + z3/d3)
+        / (1/d1 + 1/d2 + 1/d3)
+        = .55 z1 + .27 z2 + .18 z3  for distances 1 2 3
+
+    q may be one point, or a batch of points.
+    eps: approximate nearest, dist <= (1 + eps) * true nearest
+    p: use 1 / distance**p
+    weights: optional multipliers for 1 / distance**p, of the same shape as q
+    stat: accumulate wsum, wn for average weights
+
+    How many nearest neighbors should one take ?
+    a) start with 8 11 14 .. 28 in 2d 3d 4d .. 10d; see Wendel's formula
+    b) make 3 runs with nnear= e.g. 6 8 10, and look at the results --
+        |interpol 6 - interpol 8| etc., or |f - interpol*| if you have f(q).
+        I find that runtimes don't increase much at all with nnear -- ymmv.
+
+    p=1, p=2 ?
+        p=2 weights nearer points more, farther points less.
+        In 2d, the circles around query points have areas ~ distance**2,
+        so p=2 is inverse-area weighting. For example,
+            (z1/area1 + z2/area2 + z3/area3)
+            / (1/area1 + 1/area2 + 1/area3)
+            = .74 z1 + .18 z2 + .08 z3  for distances 1 2 3
+        Similarly, in 3d, p=3 is inverse-volume weighting.
+
+    Scaling:
+        if different X coordinates measure different things, Euclidean distance
+        can be way off.  For example, if X0 is in the range 0 to 1
+        but X1 0 to 1000, the X1 distances will swamp X0;
+        rescale the data, i.e. make X0.std() ~= X1.std() .
+
+    A nice property of IDW is that it's scale-free around query points:
+    if I have values z1 z2 z3 from 3 points at distances d1 d2 d3,
+    the IDW average
+        (z1/d1 + z2/d2 + z3/d3)
+        / (1/d1 + 1/d2 + 1/d3)
+    is the same for distances 1 2 3, or 10 20 30 -- only the ratios matter.
+    In contrast, the commonly-used Gaussian kernel exp( - (distance/h)**2 )
+    is exceedingly sensitive to distance and to h.
+
+        """
+    # anykernel( dj / av dj ) is also scale-free
+    # error analysis, |f(x) - idw(x)| ? todo: regular grid, nnear ndim+1, 2*ndim
 
     def __init__( self, X, z, leafsize=10, stat=0 ):
         assert len(X) == len(z), "len(X) %d != len(z) %d" % (len(X), len(z))
@@ -157,7 +207,7 @@ def gridlistin(fname,xyvcols=[0,1,2],nheader=0): #used for single coef per file
 
 
 def map2ddata(xy,vr,xyi,radius=5000.0,maptype='idw'):
-    stats=sts.describe(vr)
+    # stats=sts.describe(vr)
     # statsstd=sts.tstd(vr)
     if maptype == 'idw':
         vri=idw(xy,vr,xyi)
@@ -179,7 +229,8 @@ def map2ddata(xy,vr,xyi,radius=5000.0,maptype='idw'):
     elif maptype == 'ct':
         ct=CloughTocher2DInterpolator(xy,vr,stats[2])
         vri=ct(xyi)
-    return vri.astype(int)
+    return vri
+
 
 
 def filterhullpolygon(x,y,polygon):
@@ -199,7 +250,6 @@ def filterhullpolygon_mask(x,y,polygon):
         else:
             ma.append(False)
     return np.array(ma)
-
 
 
 def process_segylist(segyflist):
@@ -247,98 +297,41 @@ def get_samplerate(fname):
         hdrdict = dict(enumerate(srcp.header[1].items()))
     return hdrdict[39][1] / 1000
 
-def get_xy(fname,xhdr,yhdr,xyscalerhdr,trlstevery=50000):
+def get_xy(fname,xhdr,yhdr,xyscalerhdr):
     """."""
     xclst = list()
     yclst = list()
-    trnlst =list()
     with sg.open(fname,'r',ignore_geometry=True) as srcp:
-        print(f'Total # of Traces: {len(srcp.trace)}')
         for trnum,tr in enumerate(srcp.trace):
             xysch = np.fabs(srcp.header[trnum][xyscalerhdr])
             if xysch == 0:
                 xysc = 1.0
             else:
                 xysc = xysch
-            xci = srcp.header[trnum][xhdr] / xysc
-            yci = srcp.header[trnum][yhdr] / xysc
-            xclst.append(xci)
-            yclst.append(yci)
-            trnlst.append(trnum)
-            if trnum % trlstevery == 0:
-                print(f'Trace # {trnum:0d}  {xci:.2f}  {yci:.2f}')
-    xc = np.array(xclst)
-    yc = np.array(yclst)
-    trn = np.array(trnlst,dtype=int)
-    trcols = ['XC','YC','TRNUM']
-    xytrcdf = pd.DataFrame({'XC':xc,'YC':yc,'TRNUM':trn})
-    xytrcdf = xytrcdf[trcols].copy()
-    print(xytrcdf.head())
-    return xytrcdf
+            xclst.append(srcp.header[trnum][xhdr] / xysc)
+            yclst.append(srcp.header[trnum][yhdr] / xysc)
+    return xclst,yclst
 
-def process_xytrace(sa,xw,yw):
-    """.
-    sa is a df of x y tr from headers
-    xtr,ytr are x y coordinates of list of traces to locate trace numbers
-    """
-    # print(sa.head())
-    xs = sa.iloc[:,0]
-    ys = sa.iloc[:,1]
-    xys = np.transpose(np.vstack((xs,ys)))
-    xyw = np.transpose(np.vstack((xw,yw)))
-    # tr_atxy = map2ddata(xys,sa.iloc[:,2],xyw,maptype='cubic')
-    tr_atxy = map2ddata(xys,sa.iloc[:,2],xyw,maptype='triang')
-
-    return tr_atxy
-
-def seisattrib_atwell(sflist,swa):
-    sr = get_samplerate(sflist[0])
-    swa['SLICENUM'] = swa.iloc[:,1] // sr
-    for sf in sflist:
-        print(sf)
-        dirsplit,fextsplit= os.path.split(sf)
-        fname,fextn= os.path.splitext(fextsplit)
-        tracesample=list()
-        with sg.open(sf,'r',ignore_geometry=True) as srcp:
-            for i in range(swa.shape[0]):
-                tracesample.append(srcp.trace[swa.loc[i,'TRNUM']][swa.loc[i,'SLICENUM']  ])
-            swa[fname] = tracesample
-    swa.drop(['TRNUM','SLICENUM'],inplace=True,axis=1)
-    colslst =swa.columns.tolist()
-    colslst.append(colslst[4])
-    colslst.pop(4)
-    print(colslst)
-    swa = swa[colslst]
-    return swa
-
-def process_swscalecols(wseisdf,includexy=False):
+def process_sscalecols(seisdf,includexy=False):
     """."""
     if includexy:
-        wseisdf['Xscaled'] = wseisdf[wseisdf.columns[0]]
-        wseisdf['Yscaled'] = wseisdf[wseisdf.columns[1]]
+        seisdf['Xscaled'] = seisdf[seisdf.columns[0]]
+        seisdf['Yscaled'] = seisdf[seisdf.columns[1]]
         # seisdf['Zscaled'] = seisdf[seisdf.columns[2]]
         # z is not added because it is a slice, i.e. constant z
-    # print(f'wseisdf before: {wseisdf.shape}')
-    if wseisdf.isnull().values.any():
-        print(f'Warning: Null Values in the file will be dropped')
-        wseisdf.dropna(inplace=True)
-    # print(f'wseisdf after: {wseisdf.shape}')
+    if seisdf.isnull().values.any():
+        print('Warning: Null Values in the file will be dropped')
+        seisdf.dropna(inplace=True)
+    # xyzcols = [0,1,2]
+    xyzcols = [0,1]
+    xyz = seisdf[seisdf.columns[xyzcols]]
+    seisdf.drop(seisdf.columns[[xyzcols]],axis=1,inplace=True)
+    cols = seisdf.columns.tolist()
+    seisdfs = StandardScaler().fit_transform(seisdf.values)
 
-    wseisdfcols = wseisdf.columns.tolist()
-    attribonly = wseisdf.iloc[:,4:-1]
-    # print(attribonly.head())
-
-    attribcols = attribonly.columns.tolist()
-    attribonlyscaled = StandardScaler().fit_transform(attribonly.values)
-    # scaled_features_df = pd.DataFrame(scaled_features, index=df.index, columns=df.columns)
-
-    attribonlyscaleddf = pd.DataFrame(attribonlyscaled,columns = attribcols,index=wseisdf.index)
-    # print(attribonlyscaleddf.head())
-    wseisdfsxyz = pd.concat([wseisdf.iloc[:,:4],attribonlyscaleddf,wseisdf.iloc[:,-1]],axis=1)
-
-    wseisdfsxyz = wseisdfsxyz[wseisdfcols]
-    print(wseisdfsxyz.head())
-    return wseisdfsxyz
+    seisdfsdf = pd.DataFrame(seisdfs,columns=cols)
+    seisdfsxyz = pd.concat([xyz,seisdfsdf],axis=1)
+    return seisdfsxyz
 
 def process_seiswellattrib(sa,wa,intime):
     """."""
@@ -402,22 +395,6 @@ def process_seiswellattrib(sa,wa,intime):
 
     return wellsin_df
 
-def ecdf(data):
-    """Compute ECDF for a one-dimensional array of measurements."""
-
-    # Number of data points: n
-    n = len(data)
-
-    # x-data for the ECDF: n
-    x = np.sort(data)
-
-    # y-data for the ECDF: y
-    y = np.arange(1, n+1) / n
-
-    return x, y
-
-
-
 def plotwells(wdf,hideplots=True):
     """."""
     wlst = wdf[wdf.columns[0]].unique().tolist()
@@ -456,24 +433,6 @@ def plotwells(wdf,hideplots=True):
             if not hideplots:
                 plt.show()
             plt.close()
-
-    pdfecdf = "AllWellsecdf.pdf"
-    with PdfPages(pdfecdf) as pdf:
-        for wname in wlst:
-            wndf = wdf[wdf[wdf.columns[0]] == wname]
-            plt.figure(figsize=(6,6))
-            fig,ax = plt.subplots(figsize=(8,6))
-            grx,gry = ecdf(wndf.GR)
-            ax.scatter(grx,gry,s=5,c='m',label='Actual')
-            grpredx,grpredy = ecdf(wndf.GRPRED)
-            ax.scatter(grpredx,grpredy,s=5,c='g',label='Predicted')
-            ax.legend()
-            plt.title(wname)
-            pdf.savefig()
-            if not hideplots:
-                plt.show()
-            plt.close()
-
 
 
 def gensamples(datain,targetin,
@@ -611,14 +570,14 @@ def model_create(wdfsa,
 
 
 def apply_model_towells(allwdfsa,cbrmodel,
-    logname=None,scalelog=True,
-    generatesamples=False,
-    generatensamples=10,
-    generatencomponents=2,
-    plotfname=None,
-    dirsplit=None,
-    hideplots=False,
-    outdir=None):
+                        logname=None,scalelog=True,
+                        generatesamples=False,
+                        generatensamples=10,
+                        generatencomponents=2,
+                        plotfname=None,
+                        dirsplit=None,
+                        hideplots=False,
+                        outdir=None):
     """apply previously generated model."""
     X = allwdfsa.iloc[:,4 : -1]
     y = allwdfsa.iloc[:,-1]
@@ -678,6 +637,9 @@ def apply_model_towells(allwdfsa,cbrmodel,
     return allwdfsa
 
 
+
+
+
 def getcommandline():
     """Get command line options."""
     parser = argparse.ArgumentParser(description='Build one ML model to convert seismic to logs')
@@ -686,6 +648,8 @@ def getcommandline():
     parser.add_argument('--segyxhdr',type=int,default=73,help='xcoord header.default=73')
     parser.add_argument('--segyyhdr',type=int,default=77,help='ycoord header. default=77')
     parser.add_argument('--xyscalerhdr',type=int,default=71,help='hdr of xy scaler to divide by.default=71')
+    parser.add_argument('--datastart',type=int,default=0,
+        help='Both well csv and seismic segy start from this same level.default=0')
     parser.add_argument('--startendinterval',type=int,nargs=2,default=[1000,2000],
         help='Start end interval in depth/time. default= 1000 2000')
     parser.add_argument('--cbriterations',type=int,default=500,help='Learning Iterations, default =500')
@@ -739,7 +703,7 @@ def main():
     if cmdl.segyfileslist:
         sflist = list()
         sflist = process_segylist(cmdl.segyfileslist)
-        print(sflist)
+
         alldirsplit,allfextsplit = os.path.split(cmdl.segyfileslist)
         allfname,allfextn = os.path.splitext(allfextsplit)
         # allfname for naming cbr model
@@ -749,36 +713,89 @@ def main():
         sr = get_samplerate(sflist[0])
         print('Seismic Sample Rate: {}'.format(sr))
 
-        xytrcdf = get_xy(fextsplit,cmdl.segyxhdr,cmdl.segyyhdr,cmdl.xyscalerhdr)
+        xclst,yclst = get_xy(fextsplit,cmdl.segyxhdr,cmdl.segyyhdr,cmdl.xyscalerhdr)
+        xydf = pd.DataFrame({'XC':xclst,'YC':yclst})
+        scols = list()
+        for f in sflist:
+            dirsplit,fextsplit = os.path.split(f)
+            fname,fextn = os.path.splitext(fextsplit)
+            scols.append(fname)
+
+        sfname = 'allattrib'
+        # slicerange = cmdl.startendinterval[1] - cmdl.startendinterval[0]
+        # sstart = int(cmdl.startendinterval[0] // dz)
+        # send = int(cmdl.startendinterval[1] // dz)
+        if  cmdl.startendinterval[0] >= cmdl.datastart:
+            satdepth = int(cmdl.datastart // dz)
+            sstart = int(cmdl.startendinterval[0] // dz) - satdepth
+            send = int(cmdl.startendinterval[1] // dz) - satdepth
+            print('*******Please make sure that both seismic and well csv start from same depth/time' )
+            print(f'Starting slice #: {sstart}, End slice #: {send},Slice Interval: {satdepth}')
+        else:
+            print(f'start depth {cmdl.startendinterval[0]} has to be greater than start data {cmdl.datastart}')
+            exit()
+        # start_process = datetime.now()
+        for slicenum in range(sstart, send):
+            if cmdl.outdir:
+                outfslice = os.path.join(cmdl.outdir,sfname) + "_slice%d.csv" % slicenum
+            else:
+                outfslice = os.path.join(dirsplit,sfname) + "_slice%d.csv" % slicenum
+            zslice = slicenum * dz
+            if cmdl.intime:
+                wdf = allwells[allwells.TIME == zslice]
+            else:
+                wdf = allwells[allwells.DEPTH == zslice]
+            c = wdf.columns[4]
+            # log name
+            nw = wdf[~ wdf[c].isnull()].count()[4]
+            if cmdl.intime:
+                print('# of wells for time slice {} is {}'.format(zslice,nw))
+            else:
+                print('# of wells for depth slice {} is {}'.format(zslice,nw))
+
+            slicefiles = list()
+            for i in range(len(sflist)):
+                slicefiles.append(get_slice(sflist[i],slicenum))
+            slicear = np.array(slicefiles).T
+            slicedf = pd.DataFrame(slicear,columns=scols)
+
+            alldata = pd.concat((xydf,slicedf),axis=1)
+            if cmdl.intime:
+                print('Slice#: {} @ Time : {} ms'.format(slicenum,zslice) )
+            else:
+                print('Slice#: {} @ Depth : {} ms'.format(slicenum,zslice) )
+
+            # print(alldata.head())
+
+            if cmdl.slicesout:
+                alldata.to_csv(outfslice,index=False)
+            alldatas = process_sscalecols(alldata,includexy=cmdl.includexy)
+            # print('After Scaling .....')
+            # print(alldatas.head())
+            wdfsa = process_seiswellattrib(alldatas,wdf,cmdl.intime)
+            # print(wdfsa.tail())
+            # lastcol = wdfsa.shape[1]
+            # keep adding slices and building allwdfsa
+            if slicenum == sstart:
+                allwdfsa = wdfsa.copy()
+            else:
+                allwdfsa = allwdfsa.append(wdfsa)
+
         swfname = 'SWAttrib'
         if cmdl.outdir:
             wsdf = os.path.join(cmdl.outdir,swfname) + f"_{logname}.csv"
             wsdfpred = os.path.join(cmdl.outdir,swfname) + f"_{logname}_pred.csv"
             pdfxplot = os.path.join(cmdl.outdir,logname) + 'xplt.pdf'
-            pdfwplot = os.path.join(cmdl.outdir,logname) + 'wplt.pdf'
         else:
             wsdf = os.path.join(dirsplit,swfname) + f"_{logname}.csv"
             wsdfpred = os.path.join(dirsplit,swfname) + f"_{logname}_pred.csv"
             pdfxplot = os.path.join(dirsplit,logname) + 'xplt.pdf'
-            pdfwplot = os.path.join(dirsplit,logname) + 'wplt.pdf'
-
-        allwells['TRNUM'] = process_xytrace(xytrcdf,allwells.iloc[:,2],allwells.iloc[:,3])
-        print('Allwells df:')
-        print(allwells.head())
-        fig,ax = plt.subplots()
-        p = ax.scatter(allwells.DEVX,allwells.DEVY,c=allwells.TRNUM,cmap='rainbow',s=5)
-        fig.colorbar(p)
-        plt.show()
-        fig.savefig(pdfwplot)
-        if not cmdl.hideplots:
-            plt.show()
-
-        allwdfa = seisattrib_atwell(sflist,allwells)
-        allwdfsa = process_swscalecols(allwdfa)
-        allwdfsa.head()
         allwdfsa.to_csv(wsdf,index=False)
         print(f'Successfully generated all attributes with wells {wsdf}')
 
+        # start_process = datetime.now()
+        # This option is to fit a model when initially entering wellcsv
+        # i.e. wdfsa has been created and is not read in from file
         cbrmodelname = allfname + '_cbr.json'
 
         cbrmodel = model_create(allwdfsa,savemodelname=cbrmodelname,

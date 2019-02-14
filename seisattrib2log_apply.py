@@ -16,6 +16,7 @@ import os.path
 import argparse
 from datetime import datetime
 import numpy as np
+import pickle
 import scipy.signal as sg
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -31,9 +32,16 @@ from scipy.signal import savgol_filter
 from scipy import interpolate
 from sklearn.preprocessing import StandardScaler
 from sklearn import linear_model
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.svm import NuSVR
 from sklearn.metrics import r2_score, mean_squared_error
 from sklearn import mixture
 from sklearn.preprocessing import MinMaxScaler
+from keras.models import Sequential
+from keras.layers import Dense
+from keras.wrappers.scikit_learn import KerasRegressor
+from keras.models import model_from_json
+import pickle
 
 try:
     from catboost import CatBoostRegressor
@@ -136,11 +144,13 @@ def  getcommandline():
     parser.add_argument('sattribwellscsv',
         help='csv file with seismic attributes at wells generated from seisattrib2log_build.py, e.g. SWAttrib_XXX.csv ')
     parser.add_argument('MLmodelname',default=None,help='ML model name.default=none')
+    parser.add_argument('--modeltype',choices=['cbr','linreg','knn','svr','ann','sgdr'],default='cbr',
+        help='cbr, linreg, knn default= cbr')
     parser.add_argument('--segyxhdr',type=int,default=73,help='xcoord header.default=73')
     parser.add_argument('--segyyhdr',type=int,default=77,help='ycoord header. default=77')
     parser.add_argument('--xyscalerhdr',type=int,default=71,help='hdr of xy scaler to divide by.default=71')
-    parser.add_argument('--startendslice',type=int,nargs=2,
-        default=[1000,2000],help='Start end slice in depth/time. default= 1000 2000')
+    parser.add_argument('--startendinterval',type=int,nargs=2,
+        default=[1000,2000],help='Start end interval in depth/time. default= 1000 2000')
     parser.add_argument('--intime',action='store_true',default=False,
         help='processing domain. default= True for depth')
     parser.add_argument('--donotscalelog',action='store_false',default=True,
@@ -168,8 +178,8 @@ def main():
     wdf0 = allwdfsa[allwdfsa['WELL'] == wlst[0]]
     dz = np.diff(wdf0[wdf0.columns[1]])[2]
     print(f'Well Vertical increment {dz}')
-    sstart = int(cmdl.startendslice[0] // dz)
-    send = int(cmdl.startendslice[1] // dz)
+    sstart = int(cmdl.startendinterval[0] // dz)
+    send = int(cmdl.startendinterval[1] // dz)
     logname = allwdfsa.columns[-1]
     print(f'Curve Name: {logname} Sample start: {sstart}  Sample end: {send}')
 
@@ -205,17 +215,45 @@ def main():
             dirsplit,fextsplit= os.path.split(f)
             fname,fextn= os.path.splitext(fextsplit)
             scols.append(fname)
-        # sstart = cmdl.startendslice[0]
-        # send = cmdl.startendslice[1]
+        # sstart = cmdl.startendinterval[0]
+        # send = cmdl.startendinterval[1]
         start_process = datetime.now()
-        cbrmodel = CatBoostRegressor()
-        cbrmodel.load_model(cmdl.MLmodelname)
+        if cmdl.modeltype == 'cbr':
+            inmodel = CatBoostRegressor()
+            inmodel.load_model(cmdl.MLmodelname)
+            # inmodel = pickle.load(open(cmdl.MLmodelname, 'rb'))
+        elif cmdl.modeltype == 'linreg':
+            inmodel = pickle.load(open(cmdl.MLmodelname, 'rb'))
+            # result = loaded_model.score(X_test, Y_test)
+
+        elif cmdl.modeltype == 'knn':
+            inmodel = pickle.load(open(cmdl.MLmodelname, 'rb'))
+            # result = loaded_model.score(X_test, Y_test)
+        elif cmdl.modeltype == 'svr':
+            inmodel = pickle.load(open(cmdl.MLmodelname, 'rb'))
+            # result = loaded_model.score(X_test, Y_test)
+        elif cmdl.modeltype == 'ann':
+            anndirsplit,annfextsplit= os.path.split(cmdl.segyfileslist)
+            annfname,annfextn= os.path.splitext(annfextsplit)
+            annwtsfname = os.path.join(anndirsplit,annfname) + '.h5'
+        elif cmdl.modeltype == 'sgdr':
+            inmodel = pickle.load(open(cmdl.MLmodelname, 'rb'))
+
+            json_file = open(cmdl.MLmodelname, 'r')
+            loaded_model_json = json_file.read()
+            json_file.close()
+            inmodel = model_from_json(loaded_model_json)
+            # load weights into new model
+            inmodel.load_weights(annwtsfname)
+            print("Loaded model from disk")
+            inmodel.compile(loss='mean_squared_error', optimizer='adam')
+
         with sg.open(outfsegy, "r+") as srcp:
             # numoftraces = len(srcp.trace)
             for trnum,tr in enumerate(srcp.trace):
                 Xpred = collect_traces(sflist,trnum,sstart=sstart,send=send)
                 # print(Xpred.shape)
-                trpred = modelpredict(cbrmodel,Xpred,
+                trpred = modelpredict(inmodel,Xpred,
                     scalelog=cmdl.donotscalelog,
                     logmin=cmdl.logscalemm[0],
                     logmax=cmdl.logscalemm[1])

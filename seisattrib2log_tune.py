@@ -16,6 +16,7 @@ import numpy as np
 import scipy.signal as sg
 import pandas as pd
 import matplotlib.pyplot as plt
+import seaborn as sns
 from scipy import stats
 import scipy.stats as sts
 import segyio as sg
@@ -104,6 +105,26 @@ def plotwells(wdf,hideplots=True):
             if not hideplots:
                 fig.show()
             plt.close()
+
+    pdfclh = "AllWellshistograms.pdf"
+    with PdfPages(pdfclh) as pdf:
+        for wname in wlst:
+            wndf = wdf[wdf[wdf.columns[0]] == wname]
+            plt.figure(figsize=(6,6))
+            sns.distplot(wndf.GR,kde=True,
+                hist_kws={"histtype": "step", "linewidth": 2,"alpha": 1, "color": "m","label": "GR"},
+                kde_kws={"color": "m", "lw": 2, "label": "GR"})
+            sns.distplot(wndf.GRPRED,kde=True,
+                hist_kws={"histtype": "step", "linewidth": 2,"alpha": 1, "color": "g","label": "GRPRED"},
+                kde_kws={"color": "g", "lw": 2, "label": "GRPRED"})
+            plt.title(wname)
+            pdf.savefig()
+            if not hideplots:
+                plt.show()
+            plt.close()
+
+
+
 
 def gensamples(datain,targetin,
     ncomponents=2,
@@ -331,7 +352,7 @@ def getcommandline():
     parser = argparse.ArgumentParser(description='Build and tume one ML model to convert seismic to logs')
     parser.add_argument('sattribwellscsv',
         help='csv file with seismic attributes at wells depth devx devy log. Output from seisattrib2log_build.py ')
-    parser.add_argument('--logname',default='GR',help='Log curve name. default=GR')
+    # parser.add_argument('--logname',default='GR',help='Log curve name. default=GR')
     parser.add_argument('--cbriterations',type=int,default=500,help='Learning Iterations, default =500')
     parser.add_argument('--cbrlearningrate',type=float,default=0.01,help='learning_rate. default=0.01')
     parser.add_argument('--cbrdepth',type=int,default=6,help='depth of trees. default=6')
@@ -372,6 +393,8 @@ def main():
         allwdfsa = pd.read_csv(cmdl.sattribwellscsv)
         dz = np.diff(allwdfsa[allwdfsa.columns[1]])[2]
         print(f'Well Vertical increment {dz}')
+        logname = allwdfsa.columns[-1]
+        print(f'Curve Name: {logname} ')
 
         dirsplit,fextsplit = os.path.split(cmdl.seiswellscsv)
         fname,fextn = os.path.splitext(fextsplit)
